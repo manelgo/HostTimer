@@ -1,0 +1,241 @@
+///////////////////////////////////////////////////////////////////////////////////////////////////
+/**
+ *  @file   GpioRaspberryPi2B.cpp
+ *  @author Manel González Farrera
+ *  @date   Novembre 2015
+ *  @brief  Implements GpioRaspberryPi2B class
+ */
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+#include "GpioRaspberryPi2B.h"
+#include "CommonGlobalsWebTimer.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// PUBLIC METHODS
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+GpioRaspberryPi2B::GpioRaspberryPi2B(const char* instanceName) : IComponent(instanceName)
+{
+    logChannels_ = Logger::ERRORS;
+}
+
+Result GpioRaspberryPi2B::initialize()
+{
+    // Export GPIO's
+    
+    // PRODUCTIZED CONSTANTS
+    { 
+        // Number of GPIO's
+        numGpios_ = NUM_CHANNELS;
+        ASSERT( numGpios_ <= MAX_NUM_GPIOS );
+ 
+        // Designation of GPIO pin numbers
+        //                 Pin Numbers = {19, 21, 23, 29, 31, 33, 35, 37, 13, 11, 18, 22, 32, 36, 38, 40}
+        //gpioIdNumber_[MAX_NUM_GPIOS] = {10, 09, 11, 05, 06, 13, 19, 26, 27, 17, 24, 25, 12, 16, 20, 21}
+        //                    Function = {RY, RY, RY, RY, RY, RY, RY, RY, IO, IO, IO, IO, IO, IO, IO, IO}
+        gpioIdNumber_[ 0] = 10; // Pin Number 19
+        gpioIdNumber_[ 1] =  9; // Pin Number 21
+        gpioIdNumber_[ 2] = 11; // Pin Number 23
+        gpioIdNumber_[ 3] = 05; // Pin Number 29
+        gpioIdNumber_[ 4] = 06; // Pin Number 31
+        gpioIdNumber_[ 5] = 13; // Pin Number 33
+        gpioIdNumber_[ 6] = 19; // Pin Number 35
+        gpioIdNumber_[ 7] = 26; // Pin Number 37
+
+        gpioIdNumber_[ 8] =  4; // Pin Number  7
+        gpioIdNumber_[ 9] = 14; // Pin Number  8
+        gpioIdNumber_[10] = 15; // Pin Number 10
+        gpioIdNumber_[11] = 17; // Pin Number 11
+        gpioIdNumber_[12] = 27; // Pin Number 13
+        gpioIdNumber_[13] = 22; // Pin Number 15
+        gpioIdNumber_[14] = 23; // Pin Number 16
+        gpioIdNumber_[15] = 24; // Pin Number 18
+    }
+
+    // Export GPIO's to file system
+    for (unsigned int i=0; i<numGpios_; i++)
+    {
+        if ( !isGpioExported(gpioIdNumber_[i]) )
+        {
+            if ( exportGpio(gpioIdNumber_[i]) != RESULT_OK )
+            {
+                LOGGING(ERRORS, "ERROR exporting GPIO number %d", gpioIdNumber_[i]);
+                return RESULT_ERROR;
+            } 
+        }
+    }
+
+    return RESULT_OK;
+}
+
+Result GpioRaspberryPi2B::setMode(unsigned char gpioId, GpioMode_T mode)
+{
+    char auxBuffer[50];
+    std::string setDirectionCommand, setActiveLowCommand = "default_active_low";
+    std::string setDirection, getDirection, setActiveLow = "0", getActiveLow;
+
+    switch (mode)
+    {
+      case INPUT_DIGITAL_INVERTED:
+        sprintf(auxBuffer, "echo 1 > /sys/class/gpio/gpio%d/active_low", gpioIdNumber_[gpioId]);
+        setActiveLowCommand = auxBuffer;
+        setActiveLow = '1';
+      case INPUT_DIGITAL:
+        sprintf(auxBuffer, "echo in > /sys/class/gpio/gpio%d/direction", gpioIdNumber_[gpioId]);
+        setDirectionCommand = auxBuffer;
+        setDirection = "in";
+        break;
+      case OUTPUT_DIGITAL_INVERTED:
+        sprintf(auxBuffer, "echo 1 > /sys/class/gpio/gpio%d/active_low", gpioIdNumber_[gpioId]);
+        setActiveLowCommand = auxBuffer;
+        setActiveLow = '1';
+      case OUTPUT_DIGITAL:
+        sprintf(auxBuffer, "echo out > /sys/class/gpio/gpio%d/direction", gpioIdNumber_[gpioId]);
+        setDirectionCommand = auxBuffer;
+        setDirection = "out";
+        break;
+      default:
+        LOGGING(ERRORS, "ERROR GPIO mode %d unkwown", mode);
+        return RESULT_ERROR;
+    }
+    if ( setActiveLowCommand != "default_active_low" )
+    {
+        LOGGING(VERBOSE, "executing linux command '%s'...", setActiveLowCommand.c_str());
+        system(setActiveLowCommand.c_str());
+        usleep(10000);
+    }
+    LOGGING(VERBOSE, "executing linux command '%s'...", setDirectionCommand.c_str());
+    system(setDirectionCommand.c_str());
+    usleep(10000);
+    
+    // Check active low is set correctly
+    char activeLowFile[50];
+    sprintf(activeLowFile, "/sys/class/gpio/gpio%d/active_low", gpioIdNumber_[gpioId]);
+    std::ifstream activeLowFilePtr(activeLowFile);
+    if ( !activeLowFilePtr.is_open() )
+    {
+        LOGGING(ERRORS, "ERROR opening file %s", activeLowFile);
+        return RESULT_ERROR;
+    }
+    activeLowFilePtr >> getActiveLow;
+    activeLowFilePtr.close();
+    if (getActiveLow != setActiveLow)
+    {
+        LOGGING(ERRORS, "unable to set active_low to %s, level got is %s", setActiveLow.c_str(), getActiveLow.c_str());
+        return RESULT_ERROR;
+    }
+
+    // Check direction is set correctly
+    char directionFile[50];
+    sprintf(directionFile, "/sys/class/gpio/gpio%d/direction", gpioIdNumber_[gpioId]);
+    std::ifstream directionFilePtr(directionFile);
+    directionFilePtr >> getDirection;
+    directionFilePtr.close();
+    if (getDirection != setDirection)
+    {
+        LOGGING(ERRORS, "unable to set %s mode", setDirection.c_str());
+        return RESULT_ERROR;
+    }
+
+    // Set GPIO to init level to low
+    if ( mode == OUTPUT_DIGITAL || mode == OUTPUT_DIGITAL_INVERTED )
+    {
+        if ( setLevel(gpioId, 0) != RESULT_OK )
+        {
+            LOGGING(ERRORS, "ERROR setting GPIO ID %d to init level 0", gpioId);
+	    return RESULT_ERROR;
+        }
+    }
+
+    return RESULT_OK;
+}
+
+Result GpioRaspberryPi2B::getLevel(unsigned char gpioId, signed int& level) const
+{
+    char valueFileName[50];
+    sprintf(valueFileName, "/sys/class/gpio/gpio%d/value", gpioIdNumber_[gpioId]);
+    std::ifstream valueFilePtr(valueFileName);
+    valueFilePtr >> level;
+    valueFilePtr.close();
+
+    return RESULT_OK;
+}
+
+Result GpioRaspberryPi2B::setLevel(unsigned char gpioId, signed int level)
+{
+    char setLevelCommand[50];
+    std::string setLevel, getLevel;
+
+    // Check level value is supported
+    switch (level)
+    {
+      case 0:
+        setLevel = "0";
+        break;
+      case 1:
+        setLevel = "1";
+        break;
+      default:
+        LOGGING(ERRORS, "ERROR level %d is not supported", level);
+        return RESULT_ERROR;
+    }
+
+    // Set level
+    sprintf(setLevelCommand, "echo %d > /sys/class/gpio/gpio%d/value", level, gpioIdNumber_[gpioId]);  
+    LOGGING(VERBOSE, "executing linux command '%s'...", setLevelCommand);
+    system(setLevelCommand);
+    usleep(10000);
+
+    // Check level is set correctly
+    char valueFileName[50];
+    sprintf(valueFileName, "/sys/class/gpio/gpio%d/value", gpioIdNumber_[gpioId]);
+    std::ifstream valueFilePtr(valueFileName);
+    valueFilePtr >> getLevel;
+    valueFilePtr.close();
+    if (getLevel != setLevel)
+    {
+        LOGGING(ERRORS, "unable to set %s level", setLevel.c_str());
+        return RESULT_ERROR;
+    }
+
+    return RESULT_OK;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// PUBLIC METHODS
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+bool GpioRaspberryPi2B::isGpioExported(unsigned char gpioId)
+{
+    char directionFileName[50];
+
+    sprintf(directionFileName, "/sys/class/gpio/gpio%d/direction", gpioId);
+
+    std::ifstream directionFilePtr(directionFileName);
+    
+    if ( directionFilePtr.is_open() )
+    {
+        directionFilePtr.close();
+        return true;
+    }
+    else return false;
+}
+
+Result GpioRaspberryPi2B::exportGpio(unsigned char gpioId)
+{
+    char linuxCommand[50];
+
+    sprintf(linuxCommand, "echo %d > /sys/class/gpio/export", gpioId);
+    LOGGING(VERBOSE, "executing linux command '%s'...", linuxCommand);
+    system(linuxCommand);
+    usleep(200000);
+
+    if ( isGpioExported(gpioId) ) return RESULT_OK;
+    else                          return RESULT_ERROR;
+}
+
+
